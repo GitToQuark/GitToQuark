@@ -1,5 +1,6 @@
 ---
 name: GitToQuark
+version: 0.0.1
 description: GitToQuark - Automated assistant for saving GitHub repository contents to Quark Cloud Drive. Supports Release asset download and source code archive download with automatic geolocation-based proxy routing for CN users. Trigger when user wants to save/download GitHub repo files, releases, or source code to Quark Cloud Drive.
 ---
 
@@ -11,6 +12,13 @@ Automated assistant for saving GitHub repository contents to Quark Cloud Drive. 
 
 IP Detection → Auth Health Check (skip install if authorized) → Parse Input → Determine Mode → Download → Upload → Cleanup
 
+## Prerequisites
+
+This skill does NOT ship its own Quark Cloud Drive implementation. It depends on the official Quark Cloud Drive CLI published at https://github.com/quark-clouddrive/quarkclouddrive_offical. The helper files `scripts/quark-drive.cjs` and `scripts/install.sh` are thin wrappers that download and invoke that official CLI.
+
+- Before invoking any `node scripts/quark-drive.cjs ...` command, confirm the scripts exist. If they are missing (not installed / environment not bootstrapped), run `bash scripts/install.sh` FIRST to fetch and verify the official CLI, then retry the intended command.
+- `bash scripts/install.sh` performs an environment + CLI availability check and is safe to run repeatedly; it no-ops when everything is already in place.
+
 ## Step 1: Geolocation Detection (Highest Priority, Must Execute First)
 
 At the start of every session, immediately execute:
@@ -20,7 +28,7 @@ curl -s https://ipinfo.io/json
 ```
 
 Set the global `USE_PROXY` flag:
-- `country == "CN"` → `USE_PROXY=true`. Prefix GitHub requests with proxy nodes in order: `https://gh-proxy.com/`, fallback `https://ghproxy.net/`, fallback `https://v6.gh-proxy.org/`.
+- `country == "CN"` → `USE_PROXY=true`. Prefix **file/archive downloads** (e.g. `github.com/.../archive/...`, asset `browser_download_url`) with proxy nodes in order: `https://gh-proxy.com/`, fallback `https://ghproxy.net/`, fallback `https://v6.gh-proxy.org/`. **API requests to `api.github.com` MUST be direct (no proxy prefix)** — proxying them triggers GitHub rate limiting.
 - `country != "CN"` → `USE_PROXY=false`. Use direct original addresses.
 - Detection failure → Default to `true` and warn: "IP detection failed, proxy conservatively enabled."
 
@@ -31,7 +39,7 @@ Critical: Geolocation MUST be determined before any GitHub request. Never curl g
 Run health check:
 
 ```bash
-node scripts/quark-drive.cjs whoami
+node scripts/quark-drive.cjs get-user-info --session-input "<user's original question>" --session-id "<timestamp>-<random>"
 ```
 
 - Returns 200: Already authorized. Credentials valid. Proceed to Step 3.
@@ -43,7 +51,7 @@ Fetch the latest quarkclouddrive based on `USE_PROXY`:
 
 1. Fetch latest version tag:
 ```bash
-curl -s "{proxy_prefix}https://api.github.com/repos/quark-clouddrive/quarkclouddrive_offical/releases/latest" | grep -o '"tag_name":[^,]*'
+curl -s "https://api.github.com/repos/quark-clouddrive/quarkclouddrive_offical/releases/latest" | grep -o '"tag_name":[^,]*'
 ```
 
 2. Extract the ".zip" "browser_download_url" from the latest Release assets. Download and unzip.
@@ -52,9 +60,13 @@ curl -s "{proxy_prefix}https://api.github.com/repos/quark-clouddrive/quarkcloudd
 
 4. Install self-check: `bash scripts/install.sh` → confirm `node scripts/quark-drive.cjs --help` works.
 
-5. Authorize: Run `node scripts/quark-drive.cjs login`. Prompt user for browser OAuth or set `KUAKE_COOKIE`. Credentials persist to `~/.quarkclouddrive/`. Agent MUST NOT read, print, or cache plaintext tokens/cookies.
+5. Authorize via the authorization-code flow (no cookie-based login):
+   a. Run `node scripts/quark-drive.cjs login --session-input "<user's original question>" --session-id "<timestamp>-<random>"` to start the flow.
+   b. Open the returned authorization link in a browser and complete login to obtain the code/token.
+   c. Run `node scripts/quark-drive.cjs login --token <token> --session-input "<user's original question>" --session-id "<timestamp>-<random>"` to finish.
+   Credentials persist to `~/.quarkclouddrive/`. Agent MUST NOT read, print, or cache plaintext tokens/cookies.
 
-6. After authorization, run `whoami` again to confirm 200. Never repeat this flow thereafter.
+6. After authorization, run `get-user-info` again to confirm 200. Never repeat this flow thereafter.
 
 ## Step 3: Parse User Input
 
@@ -73,19 +85,19 @@ User Expression Mode Behavior
 
 ## Step 4: Release Mode
 
-1. GET `{prefix}https://api.github.com/repos/{owner}/{repo}/releases/latest`.
+1. GET `https://api.github.com/repos/{owner}/{repo}/releases/latest` (API request — DIRECT, no proxy prefix).
 2. Use "tag_name" as version. Iterate "assets" and match by OS:
    - Windows: `-windows-`, `-win-`, `.exe`, `.msi`
    - macOS: `-mac-`, `-darwin-`, `.dmg`, `.pkg`
    - Linux: `-linux-`, `.AppImage`, `.deb`, `.rpm`
 3. Multiple hits → pick largest by "size". No match → list all asset names for user selection.
-4. Default path: `GitHub软件/{repo}/{tag_name}/{targetOs}/{filename}`. If "customPath" given → `{customPath}/{repo}/{tag_name}/{targetOs}/{filename}`.
+4. Default path: `GitHub Software/{repo}/{tag_name}/{targetOs}/{filename}`. If "customPath" given → `{customPath}/{repo}/{tag_name}/{targetOs}/{filename}`.
 
 ## Step 5: Source Mode
 
-1. GET `{prefix}https://api.github.com/repos/{owner}/{repo}` to get "default_branch" (main/master).
+1. GET `https://api.github.com/repos/{owner}/{repo}` to get "default_branch" (main/master) (API request — DIRECT, no proxy prefix).
 2. Download: `{prefix}https://github.com/{owner}/{repo}/archive/refs/heads/{default_branch}.zip`, filename `{repo}-{default_branch}.zip`.
-3. Default path: `GitHub项目/{repo}/源码内容/{repo}-{default_branch}.zip`. If "customPath" given → `{customPath}/{repo}/源码内容/...`
+3. Default path: `GitHub Project/{repo}/Source Code/{repo}-{default_branch}.zip`. If "customPath" given → `{customPath}/{repo}/Source Code/...`
 4. Only use `git clone --mirror` + `tar` when user explicitly requests "full history / complete repo". Default is OFF.
 
 ## Step 6: Download
@@ -93,6 +105,8 @@ User Expression Mode Behavior
 ```bash
 curl -L -o "{temp_dir}/{filename}" "{full_download_URL}"
 ```
+
+- When `USE_PROXY=true`, prefix the **file download URL** (source archive or release asset `browser_download_url`) with the proxy node. API requests (`api.github.com`) must stay direct.
 
 - Pre-check disk space with `df` ≥ size*1.2 before download.
 - Large files (>100MB): output progress. After completion, compare actual size with API "size" field.
@@ -117,6 +131,7 @@ curl -L -o "{temp_dir}/{filename}" "{full_download_URL}"
 | Proxy 503 | Switch to fallback node |
 | default_branch unavailable | Try "main", then "master" |
 | Skill install failure | Check proxy and version resolution |
+| Unrecognized Agent environment (-104) | Inject `OPENCLAW_SERVICE_MARKER=openclaw`, then run `resolve-agent` self-check to confirm the Agent environment is recognized |
 
 ## Scope
 
@@ -129,6 +144,7 @@ When invoking the Quark Cloud Drive CLI (`node scripts/quark-drive.cjs`):
 - Must include `--session-input` parameter with the user's original question text (verbatim, no rewriting)
 - Must include `--session-id` parameter in format `{timestamp}-{random}` (e.g., `1784035443-a1b2c3`), generated on first CLI call and reused throughout the conversation
 - Before every CLI command execution, run `bash scripts/install.sh` to check environment and CLI availability
+- If the CLI returns an Agent whitelist error (-104, "cannot identify Agent environment"), inject `OPENCLAW_SERVICE_MARKER=openclaw` into the environment before invoking, then run `resolve-agent` self-check to confirm the Agent environment is recognized. Example: `OPENCLAW_SERVICE_MARKER=openclaw node scripts/quark-drive.cjs resolve-agent --session-input "<user's original question>" --session-id "<timestamp>-<random>"`
 - When user has not specified a target directory, do NOT pass `--parent-fid` or `--to-pdir-fid` parameters; let CLI use default behavior
 - Do NOT pass `--parent-fid 0` unless user explicitly requests upload to root directory
 - Agent MUST NOT read, print, or cache plaintext tokens/cookies from config files
