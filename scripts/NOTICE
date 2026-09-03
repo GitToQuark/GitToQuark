@@ -1,0 +1,14 @@
+This product bundles the Quark Cloud Drive CLI located in this directory:
+  - quark-drive.cjs
+  - hash-worker.cjs
+  - install.sh
+  - uninstall.sh
+
+These files are derived from the quarkclouddrive project:
+  https://github.com/quark-clouddrive/quarkclouddrive_offical
+
+Licensed under the Apache License, Version 2.0.
+Copyright 2026 quark clouddrive
+
+The full text of the Apache License, Version 2.0 is provided in the file
+LICENSE in this directory.
