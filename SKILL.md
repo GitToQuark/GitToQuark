@@ -14,23 +14,24 @@ IP Detection → Auth Health Check (skip install if authorized) → Parse Input 
 
 ## Prerequisites
 
-This skill does NOT ship its own Quark Cloud Drive implementation. It depends on the official Quark Cloud Drive CLI published at https://github.com/quark-clouddrive/quarkclouddrive_offical. The helper files `scripts/quark-drive.cjs` and `scripts/install.sh` are thin wrappers that download and invoke that official CLI.
+This skill bundles its own Quark Cloud Drive CLI wrapper under `scripts/` (`quark-drive.cjs`, `hash-worker.cjs`, `install.sh`, `uninstall.sh`). It is a thin wrapper around the official Quark Cloud Drive API; **no runtime download is required** — the wrapper ships with the skill. Credentials are stored locally under `~/.quarkclouddrive/` after authorization.
 
-- Before invoking any `node scripts/quark-drive.cjs ...` command, confirm the scripts exist. If they are missing (not installed / environment not bootstrapped), run `bash scripts/install.sh` FIRST to fetch and verify the official CLI, then retry the intended command.
-- `bash scripts/install.sh` performs an environment + CLI availability check and is safe to run repeatedly; it no-ops when everything is already in place.
+- The helper files `scripts/quark-drive.cjs` and `scripts/install.sh` are included in this repository. They are NOT fetched at runtime.
+- `bash scripts/install.sh` performs an environment + CLI availability check ONLY (Node.js >= 16, `scripts/quark-drive.cjs` present). It never downloads files and never modifies `SKILL.md` / `references/`. Safe to run repeatedly; it no-ops when everything is already in place.
+- Run `bash scripts/install.sh` once before first use, or whenever you see a "scripts missing / CLI unavailable" error. Do NOT run it before every command.
 
 ## Step 1: Geolocation Detection (Highest Priority, Must Execute First)
 
 At the start of every session, immediately execute:
 
 ```bash
-curl -s https://ipinfo.io/json
+curl -s --max-time 10 https://ipinfo.io/json || curl -s --max-time 10 https://ipapi.co/json
 ```
 
 Set the global `USE_PROXY` flag:
 - `country == "CN"` → `USE_PROXY=true`. Prefix **file/archive downloads** (e.g. `github.com/.../archive/...`, asset `browser_download_url`) with proxy nodes in order: `https://gh-proxy.com/`, fallback `https://ghproxy.net/`, fallback `https://v6.gh-proxy.org/`. **API requests to `api.github.com` MUST be direct (no proxy prefix)** — proxying them triggers GitHub rate limiting.
 - `country != "CN"` → `USE_PROXY=false`. Use direct original addresses.
-- Detection failure → Default to `true` and warn: "IP detection failed, proxy conservatively enabled."
+- Detection failure (both sources fail) → Default to `true` and warn: "IP detection failed, proxy conservatively enabled."
 
 Critical: Geolocation MUST be determined before any GitHub request. Never curl github.com before detection.
 
@@ -42,31 +43,26 @@ Run health check:
 node scripts/quark-drive.cjs get-user-info --session-input "<user's original question>" --session-id "<timestamp>-<random>"
 ```
 
-- Returns 200: Already authorized. Credentials valid. Proceed to Step 3.
-- Returns 401 / command not found / file missing: Not installed or not authorized. Enter installation flow.
+- Returns `code:0`: Already authorized. Credentials valid. Proceed to Step 3.
+- Returns `code:-103` (not logged in) / file missing: Not authorized or wrapper missing. Enter installation flow.
 
 ### Installation Flow (Only When Unauthorized)
 
-Fetch the latest quarkclouddrive based on `USE_PROXY`:
+The Quark CLI wrapper (`scripts/quark-drive.cjs`) is bundled with this skill, so there is no download step. Just verify the environment, then authorize.
 
-1. Fetch latest version tag:
+1. Environment check (safe, no download, never overwrites docs):
 ```bash
-curl -s "https://api.github.com/repos/quark-clouddrive/quarkclouddrive_offical/releases/latest" | grep -o '"tag_name":[^,]*'
+bash scripts/install.sh
 ```
+   Confirm it prints "Environment ready" and `node scripts/quark-drive.cjs --version` succeeds.
 
-2. Extract the ".zip" "browser_download_url" from the latest Release assets. Download and unzip.
-
-3. Fallback (only if step 1 fails): `https://pdds.quark.cn/download/stfile/bbhhdeegcbcfbdjdp/quarkclouddrive-1.0.15.zip`
-
-4. Install self-check: `bash scripts/install.sh` → confirm `node scripts/quark-drive.cjs --help` works.
-
-5. Authorize via the authorization-code flow (no cookie-based login):
+2. Authorize via the authorization-code flow (no cookie-based login):
    a. Run `node scripts/quark-drive.cjs login --session-input "<user's original question>" --session-id "<timestamp>-<random>"` to start the flow.
    b. Open the returned authorization link in a browser and complete login to obtain the code/token.
    c. Run `node scripts/quark-drive.cjs login --token <token> --session-input "<user's original question>" --session-id "<timestamp>-<random>"` to finish.
    Credentials persist to `~/.quarkclouddrive/`. Agent MUST NOT read, print, or cache plaintext tokens/cookies.
 
-6. After authorization, run `get-user-info` again to confirm 200. Never repeat this flow thereafter.
+3. After authorization, run `get-user-info` again to confirm `code:0`. Never repeat this flow thereafter.
 
 ## Step 3: Parse User Input
 
@@ -131,7 +127,7 @@ curl -L -o "{temp_dir}/{filename}" "{full_download_URL}"
 | Proxy 503 | Switch to fallback node |
 | default_branch unavailable | Try "main", then "master" |
 | Skill install failure | Check proxy and version resolution |
-| Unrecognized Agent environment (-104) | Inject `OPENCLAW_SERVICE_MARKER=openclaw`, then run `resolve-agent` self-check to confirm the Agent environment is recognized |
+| Unrecognized Agent environment (-104) | The CLI auto-detects the agent channel (e.g. WorkBuddy → `QK_AGENT_ID=workbuddy`). If -104 occurs, ensure the agent runtime exposes its channel id; OpenClaw-based agents inject `OPENCLAW_SERVICE_MARKER=openclaw`. Then run `resolve-agent` self-check to confirm `QK_AGENT_ID` is recognized |
 
 ## Scope
 
@@ -143,8 +139,19 @@ When invoking the Quark Cloud Drive CLI (`node scripts/quark-drive.cjs`):
 
 - Must include `--session-input` parameter with the user's original question text (verbatim, no rewriting)
 - Must include `--session-id` parameter in format `{timestamp}-{random}` (e.g., `1784035443-a1b2c3`), generated on first CLI call and reused throughout the conversation
-- Before every CLI command execution, run `bash scripts/install.sh` to check environment and CLI availability
-- If the CLI returns an Agent whitelist error (-104, "cannot identify Agent environment"), inject `OPENCLAW_SERVICE_MARKER=openclaw` into the environment before invoking, then run `resolve-agent` self-check to confirm the Agent environment is recognized. Example: `OPENCLAW_SERVICE_MARKER=openclaw node scripts/quark-drive.cjs resolve-agent --session-input "<user's original question>" --session-id "<timestamp>-<random>"`
+- Run `bash scripts/install.sh` only on first use or when a "scripts missing / CLI unavailable" error appears. Do NOT run it before every command.
+- If the CLI returns an Agent whitelist error (-104, "cannot identify Agent environment"), the agent channel was not recognized. The CLI auto-detects the agent channel (e.g. WorkBuddy → `QK_AGENT_ID=workbuddy`); OpenClaw-based agents should inject `OPENCLAW_SERVICE_MARKER=openclaw`. Then run `resolve-agent` self-check to confirm `QK_AGENT_ID` is recognized. Example: `OPENCLAW_SERVICE_MARKER=openclaw node scripts/quark-drive.cjs resolve-agent --session-input "<user's original question>" --session-id "<timestamp>-<random>"`
 - When user has not specified a target directory, do NOT pass `--parent-fid` or `--to-pdir-fid` parameters; let CLI use default behavior
 - Do NOT pass `--parent-fid 0` unless user explicitly requests upload to root directory
 - Agent MUST NOT read, print, or cache plaintext tokens/cookies from config files
+
+### CLI Commands Used by This Skill
+
+| Command | Purpose |
+|---------|---------|
+| `login` | Authorize Quark Cloud Drive (OAuth in browser); `login --token <token>` to finish |
+| `get-user-info` | Auth health check — `code:0` when authorized, `code:-103` when not logged in |
+| `upload` | Upload local file/folder; `--parent-fid <fid>` sets the target directory |
+| `create-folder` | Create remote folder; `--dir-path <path>` (supports nested), `--parent-fid <fid>` |
+| `resolve-agent` | Output the current agent channel id (`QK_AGENT_ID`), e.g. `workbuddy` |
+| `search` / `share` / `saveas` / `summary` / `qa` | Other available commands — see `node scripts/quark-drive.cjs --help` |
